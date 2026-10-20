@@ -259,7 +259,7 @@ jobs:
           skipped = 0
 
           def apply_filled_notes():
-              nonlocal applied, skipped
+              global applied, skipped
               if not cache_exists:
                   return
               for cached in old_cache_apps:
