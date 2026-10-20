@@ -15,7 +15,7 @@ jobs:
 
     env:
       TARGET_REPO: ikiraplus/ipastore
-      IPASTORE_TOKEN: ${{ secrets.IPASTORE_TOKEN }}
+      IKIRAPLUS_STORAGE_BRIDGE_TOKEN: ${{ secrets.IKIRAPLUS_STORAGE_BRIDGE_TOKEN }}
       PROXY_URL: ${{ github.event.client_payload.sourceUrl }}
       ORIGINAL_URL: ${{ github.event.client_payload.originalUrl || github.event.client_payload.sourceUrl }}
       ASSET_NAME: ${{ github.event.client_payload.assetName }}
@@ -28,12 +28,12 @@ jobs:
       EXPECTED_SIZE: ${{ github.event.client_payload.expectedSize }}
 
     steps:
-      - name: Validate private storage token
+      - name: Validate storage bridge token
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${IPASTORE_TOKEN:-}" || {
-            echo "Missing repository secret: IPASTORE_TOKEN"
+          test -n "${IKIRAPLUS_STORAGE_BRIDGE_TOKEN:-}" || {
+            echo "Missing repository secret: IKIRAPLUS_STORAGE_BRIDGE_TOKEN"
             exit 1
           }
 
@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           ENGINE="$RUNNER_TEMP/ikiraplus-storage-private.yml"
           curl --fail --silent --show-error --retry 5 --retry-delay 1 --retry-all-errors \
-            -H "Authorization: Bearer $IPASTORE_TOKEN" \
+            -H "Authorization: Bearer $IKIRAPLUS_STORAGE_BRIDGE_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/$TARGET_REPO/contents/.github/workflows/ikiraplus-storage.yml?ref=main" \
@@ -70,7 +70,7 @@ jobs:
 
           runner_repo = os.environ["GITHUB_REPOSITORY"]
           target_repo = os.environ["TARGET_REPO"]
-          token = os.environ.get("IPASTORE_TOKEN", "")
+          token = os.environ.get("IKIRAPLUS_STORAGE_BRIDGE_TOKEN", "")
 
           required = [
               "Report started to Worker",
