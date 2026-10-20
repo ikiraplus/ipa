@@ -1,0 +1,370 @@
+name: JOM Missing Descriptions Cache
+run-name: "JOM descriptions • ${{ github.event.inputs.mode || github.event.client_payload.mode || 'auto' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "refresh = build cache, apply = move filled notes to JOM, clear = apply filled notes then empty cache"
+        required: true
+        default: refresh
+        type: choice
+        options:
+          - refresh
+          - apply
+          - clear
+  repository_dispatch:
+    types: [ikiraplus_jom_descriptions]
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ikiraplus-admin-store
+  cancel-in-progress: false
+
+jobs:
+  descriptions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Validate bridge token
+        shell: bash
+        env:
+          BRIDGE_TOKEN: ${{ secrets.IKIRAPLUS_STORAGE_BRIDGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${BRIDGE_TOKEN:-}" || {
+            echo "Missing repository secret: IKIRAPLUS_STORAGE_BRIDGE_TOKEN"
+            exit 1
+          }
+
+      - name: Checkout private store
+        uses: actions/checkout@v4
+        with:
+          repository: ikiraplus/store
+          ref: main
+          token: ${{ secrets.IKIRAPLUS_STORAGE_BRIDGE_TOKEN }}
+          path: store
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Build, apply or expire description cache
+        shell: python
+        working-directory: store
+        run: |
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import shutil
+
+          root = pathlib.Path('.')
+          jom_path = root / 'jom.json'
+          cache_path = root / 'admin' / 'missing-descriptions.json'
+          cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+          event = {}
+          try:
+              event = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))
+          except Exception:
+              event = {}
+
+          event_name = os.environ.get('GITHUB_EVENT_NAME', '')
+          if event_name == 'schedule':
+              mode = 'auto'
+          elif event_name == 'repository_dispatch':
+              mode = str((event.get('client_payload') or {}).get('mode') or 'refresh').strip().lower()
+          else:
+              mode = str((event.get('inputs') or {}).get('mode') or 'refresh').strip().lower()
+
+          if mode not in {'refresh', 'apply', 'clear', 'auto'}:
+              raise SystemExit(f'Unsupported mode: {mode}')
+
+          now = dt.datetime.now(dt.timezone.utc)
+          ttl = dt.timedelta(hours=48)
+
+          def iso(value):
+              return value.astimezone(dt.timezone.utc).isoformat().replace('+00:00', 'Z')
+
+          def parse_time(value):
+              text = str(value or '').strip()
+              if not text:
+                  return None
+              try:
+                  if text.endswith('Z'):
+                      text = text[:-1] + '+00:00'
+                  parsed = dt.datetime.fromisoformat(text)
+                  if parsed.tzinfo is None:
+                      parsed = parsed.replace(tzinfo=dt.timezone.utc)
+                  return parsed.astimezone(dt.timezone.utc)
+              except Exception:
+                  return None
+
+          def load_json(path, fallback):
+              try:
+                  return json.loads(path.read_text(encoding='utf-8'))
+              except Exception:
+                  return fallback
+
+          def jom_apps(doc):
+              if isinstance(doc, dict) and isinstance(doc.get('apps'), list):
+                  return doc['apps'], 'apps'
+              if isinstance(doc, list):
+                  return doc, None
+              raise RuntimeError('jom.json does not contain an apps array')
+
+          def note_text(item):
+              return str((item or {}).get('note') or '').strip()
+
+          def bundle_value(item):
+              item = item or {}
+              for key in ('bundleIdentifier', 'bundleId', 'bundle_id', 'bundleID', 'bundle'):
+                  value = str(item.get(key) or '').strip()
+                  if value:
+                      return value
+              return ''
+
+          def norm(value):
+              return str(value or '').strip().casefold()
+
+          def candidates(items, cached):
+              cid = norm((cached or {}).get('id'))
+              if cid:
+                  rows = [i for i, item in enumerate(items) if norm((item or {}).get('id')) == cid]
+                  if len(rows) == 1:
+                      return rows
+
+              cbundle = norm(bundle_value(cached))
+              if cbundle:
+                  rows = [i for i, item in enumerate(items) if norm(bundle_value(item)) == cbundle]
+                  if len(rows) == 1:
+                      return rows
+
+              curl = norm((cached or {}).get('ipaUrl'))
+              if curl:
+                  rows = [i for i, item in enumerate(items) if norm((item or {}).get('ipaUrl')) == curl]
+                  if len(rows) == 1:
+                      return rows
+
+              cname = norm((cached or {}).get('name'))
+              cver = norm((cached or {}).get('version'))
+              if cname:
+                  rows = [
+                      i for i, item in enumerate(items)
+                      if norm((item or {}).get('name')) == cname
+                      and (not cver or norm((item or {}).get('version')) == cver)
+                  ]
+                  if len(rows) == 1:
+                      return rows
+              return []
+
+          def find_existing_cache_note(cache_apps, item):
+              rows = candidates(cache_apps, item)
+              if len(rows) == 1:
+                  return note_text(cache_apps[rows[0]])
+              return ''
+
+          def build_cache(apps, old_cache_apps):
+              rows = []
+              for item in apps:
+                  if note_text(item):
+                      continue
+                  clone = dict(item or {})
+                  clone['note'] = find_existing_cache_note(old_cache_apps, item)
+                  rows.append(clone)
+              return {
+                  'version': 1,
+                  'source': 'jom.json',
+                  'generatedAt': iso(now),
+                  'expiresAt': iso(now + ttl),
+                  'ttlHours': 48,
+                  'totalMissing': len(rows),
+                  'apps': rows
+              }
+
+          def write_cache(doc):
+              cache_path.write_text(
+                  json.dumps(doc, ensure_ascii=False, indent=2) + '\n',
+                  encoding='utf-8'
+              )
+
+          def empty_cache(reason, old_cache=None):
+              old_cache = old_cache if isinstance(old_cache, dict) else {}
+              doc = {
+                  'version': 1,
+                  'source': 'jom.json',
+                  'generatedAt': old_cache.get('generatedAt') or iso(now),
+                  'expiresAt': old_cache.get('expiresAt') or iso(now),
+                  'clearedAt': iso(now),
+                  'clearReason': reason,
+                  'ttlHours': 48,
+                  'totalMissing': 0,
+                  'apps': []
+              }
+              write_cache(doc)
+
+          def rebuild_chunks(apps):
+              out = root / 'chunks'
+              if out.exists():
+                  shutil.rmtree(out)
+              out.mkdir(parents=True, exist_ok=True)
+
+              chunk_size = 100
+              chunks = []
+              for index, start in enumerate(range(0, len(apps), chunk_size), 1):
+                  part = apps[start:start + chunk_size]
+                  filename = f'apps-{index:03d}.json'
+                  raw = json.dumps({'apps': part}, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+                  (out / filename).write_bytes(raw)
+                  chunks.append({
+                      'file': filename,
+                      'start': start,
+                      'count': len(part),
+                      'hash': hashlib.sha256(raw).hexdigest()[:16]
+                  })
+
+              manifest = {
+                  'version': 2,
+                  'source': 'jom.json',
+                  'sourceHash': hashlib.sha256(jom_path.read_bytes()).hexdigest()[:20],
+                  'chunkSize': chunk_size,
+                  'total': len(apps),
+                  'chunks': chunks
+              }
+              (out / 'manifest.json').write_text(
+                  json.dumps(manifest, ensure_ascii=False, separators=(',', ':')),
+                  encoding='utf-8'
+              )
+
+          jom_doc = load_json(jom_path, None)
+          if jom_doc is None:
+              raise RuntimeError('Could not read jom.json')
+          apps, apps_key = jom_apps(jom_doc)
+
+          cache_exists = cache_path.exists()
+          old_cache = load_json(cache_path, {}) if cache_exists else {}
+          old_cache_apps = old_cache.get('apps') if isinstance(old_cache, dict) else []
+          if not isinstance(old_cache_apps, list):
+              old_cache_apps = []
+
+          expires_at = parse_time(old_cache.get('expiresAt') if isinstance(old_cache, dict) else None)
+          expired = bool(cache_exists and expires_at and now >= expires_at)
+
+          applied = 0
+          skipped = 0
+
+          def apply_filled_notes():
+              nonlocal applied, skipped
+              if not cache_exists:
+                  return
+              for cached in old_cache_apps:
+                  text = note_text(cached)
+                  if not text:
+                      continue
+                  rows = candidates(apps, cached)
+                  if len(rows) != 1:
+                      skipped += 1
+                      continue
+                  target = apps[rows[0]]
+                  if note_text(target):
+                      skipped += 1
+                      continue
+                  target['note'] = text
+                  applied += 1
+
+          if mode == 'auto':
+              if not cache_exists:
+                  print('No cache file. Scheduled check has nothing to do.')
+              elif not expired:
+                  print('Cache is still valid. No changes needed.')
+              else:
+                  apply_filled_notes()
+                  if applied:
+                      if apps_key is None:
+                          jom_doc = apps
+                      else:
+                          jom_doc[apps_key] = apps
+                      jom_path.write_text(json.dumps(jom_doc, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+                      rebuild_chunks(apps)
+                  empty_cache('expired-48h', old_cache)
+                  print(f'Expired cache cleared. Applied descriptions before clear: {applied}; skipped: {skipped}')
+
+          elif mode == 'refresh':
+              doc = build_cache(apps, old_cache_apps)
+              write_cache(doc)
+              print(f'Cache refreshed. Missing descriptions: {doc["totalMissing"]}')
+
+          elif mode == 'apply':
+              if not cache_exists:
+                  raise RuntimeError('Cache file does not exist. Run refresh first.')
+              apply_filled_notes()
+              if applied:
+                  if apps_key is None:
+                      jom_doc = apps
+                  else:
+                      jom_doc[apps_key] = apps
+                  jom_path.write_text(json.dumps(jom_doc, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+                  rebuild_chunks(apps)
+              doc = build_cache(apps, old_cache_apps)
+              write_cache(doc)
+              print(f'Applied descriptions: {applied}; skipped: {skipped}; still missing: {doc["totalMissing"]}')
+
+          elif mode == 'clear':
+              if cache_exists:
+                  apply_filled_notes()
+                  if applied:
+                      if apps_key is None:
+                          jom_doc = apps
+                      else:
+                          jom_doc[apps_key] = apps
+                      jom_path.write_text(json.dumps(jom_doc, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+                      rebuild_chunks(apps)
+                  empty_cache('manual-clear', old_cache)
+                  print(f'Cache cleared. Applied descriptions before clear: {applied}; skipped: {skipped}')
+              else:
+                  empty_cache('manual-clear', {})
+                  print('Created an empty cache file.')
+
+      - name: Commit cache and JOM changes
+        shell: bash
+        working-directory: store
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A jom.json chunks admin/missing-descriptions.json 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "JOM descriptions cache update [skip ci]"
+
+          attempt=1
+          max_attempts=8
+          while [ "$attempt" -le "$max_attempts" ]; do
+            echo "Push attempt $attempt/$max_attempts"
+            git fetch origin main
+            git rebase origin/main
+
+            if git push origin HEAD:main; then
+              echo "JOM description cache changes pushed successfully."
+              exit 0
+            fi
+
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "Push still failed after $max_attempts attempts."
+              exit 1
+            fi
+
+            sleep $(( attempt * 2 ))
+            attempt=$((attempt + 1))
+          done
