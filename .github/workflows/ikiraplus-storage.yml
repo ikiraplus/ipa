@@ -15,6 +15,7 @@ jobs:
 
     env:
       TARGET_REPO: ikiraplus/ipastore
+      PRIVATE_ENGINE_REF: be0b867c1afeba2bc03857af8c756524d4c10698
       IKIRAPLUS_STORAGE_BRIDGE_TOKEN: ${{ secrets.IKIRAPLUS_STORAGE_BRIDGE_TOKEN }}
       PROXY_URL: ${{ github.event.client_payload.sourceUrl }}
       ORIGINAL_URL: ${{ github.event.client_payload.originalUrl || github.event.client_payload.sourceUrl }}
@@ -46,7 +47,7 @@ jobs:
             -H "Authorization: Bearer $IKIRAPLUS_STORAGE_BRIDGE_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/$TARGET_REPO/contents/.github/workflows/ikiraplus-storage.yml?ref=main" \
+            "https://api.github.com/repos/$TARGET_REPO/contents/.github/workflows/ikiraplus-storage.yml?ref=$PRIVATE_ENGINE_REF" \
             | jq -r '.content' | tr -d '\n' | base64 -d > "$ENGINE"
           test -s "$ENGINE"
 
@@ -121,7 +122,6 @@ jobs:
                       pass
               return outputs
 
-          # Keep the run URL pointed at the public runner repository.
           run_step("Report started to Worker")
           run_step("Validate request")
 
@@ -130,7 +130,6 @@ jobs:
 
           run_step("Download and validate real file")
 
-          # Only the release operations are pointed at the private target repository.
           upload_outputs = run_step("Upload to first available storage release", target=True)
           storage_tag = upload_outputs.get("tag", "").strip()
           if not storage_tag:
