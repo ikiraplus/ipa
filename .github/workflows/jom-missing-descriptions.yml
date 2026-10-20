@@ -1,7 +1,11 @@
 name: JOM Missing Descriptions Cache
-run-name: "JOM descriptions • ${{ github.event.inputs.mode || github.event.client_payload.mode || 'auto' }}"
+run-name: "JOM descriptions • ${{ github.event_name == 'push' && 'apply' || github.event.inputs.mode || github.event.client_payload.mode || 'auto' }}"
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/jom-missing-descriptions.yml'
   workflow_dispatch:
     inputs:
       mode:
@@ -75,7 +79,9 @@ jobs:
               event = {}
 
           event_name = os.environ.get('GITHUB_EVENT_NAME', '')
-          if event_name == 'schedule':
+          if event_name == 'push':
+              mode = 'apply'
+          elif event_name == 'schedule':
               mode = 'auto'
           elif event_name == 'repository_dispatch':
               mode = str((event.get('client_payload') or {}).get('mode') or 'refresh').strip().lower()
