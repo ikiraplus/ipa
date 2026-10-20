@@ -17,16 +17,6 @@ jobs:
       TARGET_REPO: ikiraplus/ipastore
       PRIVATE_ENGINE_REF: be0b867c1afeba2bc03857af8c756524d4c10698
       IKIRAPLUS_STORAGE_BRIDGE_TOKEN: ${{ secrets.IKIRAPLUS_STORAGE_BRIDGE_TOKEN }}
-      PROXY_URL: ${{ github.event.client_payload.sourceUrl }}
-      ORIGINAL_URL: ${{ github.event.client_payload.originalUrl || github.event.client_payload.sourceUrl }}
-      ASSET_NAME: ${{ github.event.client_payload.assetName }}
-      SHORT_ID: ${{ github.event.client_payload.shortId }}
-      CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
-      CALLBACK_START_URL: ${{ github.event.client_payload.callbackStartUrl }}
-      CALLBACK_FAIL_URL: ${{ github.event.client_payload.callbackFailUrl }}
-      CALLBACK_PROGRESS_URL: ${{ github.event.client_payload.callbackProgressUrl }}
-      CALLBACK_TOKEN: ${{ github.event.client_payload.callbackToken }}
-      EXPECTED_SIZE: ${{ github.event.client_payload.expectedSize }}
 
     steps:
       - name: Validate storage bridge token
@@ -57,6 +47,7 @@ jobs:
           set -euo pipefail
           python3 -m pip install --disable-pip-version-check --quiet pyyaml
           python3 <<'PY'
+          import json
           import os
           import subprocess
           import tempfile
@@ -65,6 +56,40 @@ jobs:
           engine_path = os.path.join(os.environ["RUNNER_TEMP"], "ikiraplus-storage-private.yml")
           with open(engine_path, "r", encoding="utf-8") as fh:
               workflow = yaml.safe_load(fh)
+
+          with open(os.environ["GITHUB_EVENT_PATH"], "r", encoding="utf-8") as fh:
+              event = json.load(fh)
+
+          payload = event.get("client_payload") or {}
+          source_url = str(payload.get("sourceUrl") or "").strip()
+          original_url = str(payload.get("originalUrl") or source_url).strip()
+
+          runtime_env = {
+              "PROXY_URL": source_url,
+              "ORIGINAL_URL": original_url,
+              "ASSET_NAME": str(payload.get("assetName") or "").strip(),
+              "SHORT_ID": str(payload.get("shortId") or "").strip(),
+              "CALLBACK_URL": str(payload.get("callbackUrl") or "").strip(),
+              "CALLBACK_START_URL": str(payload.get("callbackStartUrl") or "").strip(),
+              "CALLBACK_FAIL_URL": str(payload.get("callbackFailUrl") or "").strip(),
+              "CALLBACK_PROGRESS_URL": str(payload.get("callbackProgressUrl") or "").strip(),
+              "CALLBACK_TOKEN": str(payload.get("callbackToken") or "").strip(),
+              "EXPECTED_SIZE": str(payload.get("expectedSize") or "").strip(),
+          }
+
+          # These values must never be printed in this public repository's logs.
+          # GitHub masks them if any child command accidentally emits them later.
+          for value in (
+              runtime_env["PROXY_URL"],
+              runtime_env["ORIGINAL_URL"],
+              runtime_env["CALLBACK_URL"],
+              runtime_env["CALLBACK_START_URL"],
+              runtime_env["CALLBACK_FAIL_URL"],
+              runtime_env["CALLBACK_PROGRESS_URL"],
+              runtime_env["CALLBACK_TOKEN"],
+          ):
+              if value:
+                  print(f"::add-mask::{value}", flush=True)
 
           steps = workflow["jobs"]["mirror-to-release"]["steps"]
           by_name = {step.get("name"): step for step in steps if step.get("name")}
@@ -92,6 +117,7 @@ jobs:
                   raise RuntimeError(f"Step has no run script: {name}")
 
               env = os.environ.copy()
+              env.update(runtime_env)
               env["GH_TOKEN"] = token
               env["GITHUB_REPOSITORY"] = target_repo if target else runner_repo
               if extra_env:
@@ -125,7 +151,7 @@ jobs:
           run_step("Report started to Worker")
           run_step("Validate request")
 
-          if "ipaomtk.com" in os.environ.get("ORIGINAL_URL", ""):
+          if "ipaomtk.com" in runtime_env["ORIGINAL_URL"]:
               run_step("Prepare IPAOMTK browser fallback")
 
           run_step("Download and validate real file")
@@ -152,8 +178,12 @@ jobs:
         shell: bash
         run: |
           set +e
+          SHORT_ID="$(jq -r '.client_payload.shortId // empty' "$GITHUB_EVENT_PATH")"
+          CALLBACK_FAIL_URL="$(jq -r '.client_payload.callbackFailUrl // empty' "$GITHUB_EVENT_PATH")"
           CALLBACK_TOKEN="$(jq -r '.client_payload.callbackToken // empty' "$GITHUB_EVENT_PATH")"
-          if [ -z "${CALLBACK_FAIL_URL:-}" ] || [ -z "$CALLBACK_TOKEN" ] || [ -z "${SHORT_ID:-}" ]; then exit 0; fi
+          if [ -z "$CALLBACK_FAIL_URL" ] || [ -z "$CALLBACK_TOKEN" ] || [ -z "$SHORT_ID" ]; then exit 0; fi
+          echo "::add-mask::$CALLBACK_FAIL_URL"
+          echo "::add-mask::$CALLBACK_TOKEN"
           RUN_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           payload="$(jq -n \
             --arg id "$SHORT_ID" \
