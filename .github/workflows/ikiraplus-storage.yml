@@ -1,0 +1,168 @@
+name: iKiraPlus Storage Public Runner
+run-name: "iKiraPlus storage • ${{ github.event.client_payload.shortId }}"
+
+on:
+  repository_dispatch:
+    types: [ikiraplus_storage]
+
+permissions:
+  contents: read
+
+jobs:
+  mirror-to-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      TARGET_REPO: ikiraplus/ipastore
+      IPASTORE_TOKEN: ${{ secrets.IPASTORE_TOKEN }}
+      PROXY_URL: ${{ github.event.client_payload.sourceUrl }}
+      ORIGINAL_URL: ${{ github.event.client_payload.originalUrl || github.event.client_payload.sourceUrl }}
+      ASSET_NAME: ${{ github.event.client_payload.assetName }}
+      SHORT_ID: ${{ github.event.client_payload.shortId }}
+      CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
+      CALLBACK_START_URL: ${{ github.event.client_payload.callbackStartUrl }}
+      CALLBACK_FAIL_URL: ${{ github.event.client_payload.callbackFailUrl }}
+      CALLBACK_PROGRESS_URL: ${{ github.event.client_payload.callbackProgressUrl }}
+      CALLBACK_TOKEN: ${{ github.event.client_payload.callbackToken }}
+      EXPECTED_SIZE: ${{ github.event.client_payload.expectedSize }}
+
+    steps:
+      - name: Validate private storage token
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${IPASTORE_TOKEN:-}" || {
+            echo "Missing repository secret: IPASTORE_TOKEN"
+            exit 1
+          }
+
+      - name: Fetch private storage engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE="$RUNNER_TEMP/ikiraplus-storage-private.yml"
+          curl --fail --silent --show-error --retry 5 --retry-delay 1 --retry-all-errors \
+            -H "Authorization: Bearer $IPASTORE_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$TARGET_REPO/contents/.github/workflows/ikiraplus-storage.yml?ref=main" \
+            | jq -r '.content' | tr -d '\n' | base64 -d > "$ENGINE"
+          test -s "$ENGINE"
+
+      - name: Run private storage engine on public runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet pyyaml
+          python3 <<'PY'
+          import os
+          import subprocess
+          import tempfile
+          import yaml
+
+          engine_path = os.path.join(os.environ["RUNNER_TEMP"], "ikiraplus-storage-private.yml")
+          with open(engine_path, "r", encoding="utf-8") as fh:
+              workflow = yaml.safe_load(fh)
+
+          steps = workflow["jobs"]["mirror-to-release"]["steps"]
+          by_name = {step.get("name"): step for step in steps if step.get("name")}
+
+          runner_repo = os.environ["GITHUB_REPOSITORY"]
+          target_repo = os.environ["TARGET_REPO"]
+          token = os.environ.get("IPASTORE_TOKEN", "")
+
+          required = [
+              "Report started to Worker",
+              "Validate request",
+              "Prepare IPAOMTK browser fallback",
+              "Download and validate real file",
+              "Upload to first available storage release",
+              "Verify uploaded asset size",
+              "Make GitHub the primary DL source immediately",
+          ]
+          missing = [name for name in required if name not in by_name]
+          if missing:
+              raise SystemExit("Private storage workflow changed; missing steps: " + ", ".join(missing))
+
+          def run_step(name, *, target=False, extra_env=None):
+              script = by_name[name].get("run")
+              if not script:
+                  raise RuntimeError(f"Step has no run script: {name}")
+
+              env = os.environ.copy()
+              env["GH_TOKEN"] = token
+              env["GITHUB_REPOSITORY"] = target_repo if target else runner_repo
+              if extra_env:
+                  env.update(extra_env)
+
+              fd, output_path = tempfile.mkstemp(prefix="ikiraplus-output-")
+              os.close(fd)
+              env["GITHUB_OUTPUT"] = output_path
+
+              print(f"::group::{name}", flush=True)
+              try:
+                  subprocess.run(["bash", "-c", script], env=env, check=True)
+              finally:
+                  print("::endgroup::", flush=True)
+
+              outputs = {}
+              try:
+                  with open(output_path, "r", encoding="utf-8") as fh:
+                      for raw in fh:
+                          line = raw.rstrip("\n")
+                          if "=" in line:
+                              key, value = line.split("=", 1)
+                              outputs[key] = value
+              finally:
+                  try:
+                      os.unlink(output_path)
+                  except OSError:
+                      pass
+              return outputs
+
+          # Keep the run URL pointed at the public runner repository.
+          run_step("Report started to Worker")
+          run_step("Validate request")
+
+          if "ipaomtk.com" in os.environ.get("ORIGINAL_URL", ""):
+              run_step("Prepare IPAOMTK browser fallback")
+
+          run_step("Download and validate real file")
+
+          # Only the release operations are pointed at the private target repository.
+          upload_outputs = run_step("Upload to first available storage release", target=True)
+          storage_tag = upload_outputs.get("tag", "").strip()
+          if not storage_tag:
+              raise RuntimeError("Storage upload completed without a storage tag output")
+
+          run_step(
+              "Verify uploaded asset size",
+              target=True,
+              extra_env={"STORAGE_TAG": storage_tag},
+          )
+
+          run_step(
+              "Make GitHub the primary DL source immediately",
+              extra_env={"STORAGE_TAG": storage_tag},
+          )
+          PY
+
+      - name: Report failure to Worker
+        if: ${{ failure() || cancelled() }}
+        shell: bash
+        run: |
+          set +e
+          CALLBACK_TOKEN="$(jq -r '.client_payload.callbackToken // empty' "$GITHUB_EVENT_PATH")"
+          if [ -z "${CALLBACK_FAIL_URL:-}" ] || [ -z "$CALLBACK_TOKEN" ] || [ -z "${SHORT_ID:-}" ]; then exit 0; fi
+          RUN_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          payload="$(jq -n \
+            --arg id "$SHORT_ID" \
+            --arg token "$CALLBACK_TOKEN" \
+            --arg message "iKiraPlus Storage Backup failed — افتح GitHub Action للتفاصيل" \
+            --arg conclusion "failure" \
+            --argjson runId "$GITHUB_RUN_ID" \
+            --arg runUrl "$RUN_URL" \
+            '{id:$id,token:$token,message:$message,conclusion:$conclusion,runId:$runId,runUrl:$runUrl}')"
+          curl --silent --show-error --retry 8 --retry-delay 1 --retry-all-errors \
+            --header "Content-Type: application/json" --data "$payload" "$CALLBACK_FAIL_URL" || true
