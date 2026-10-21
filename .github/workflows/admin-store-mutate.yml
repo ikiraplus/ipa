@@ -4,6 +4,7 @@ run-name: "Admin store • ${{ github.event.client_payload.requestId || 'queue' 
 on:
   repository_dispatch:
     types: [ikiraplus_admin_mutate]
+  workflow_dispatch:
 
 permissions:
   contents: read
