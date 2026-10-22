@@ -6,6 +6,8 @@ on:
     paths:
       - '.github/workflows/admin-queue-kick.yml'
   workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
 
 permissions:
   contents: write
