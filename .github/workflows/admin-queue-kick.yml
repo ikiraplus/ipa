@@ -1,13 +1,7 @@
 name: iKiraPlus Admin Queue Kick
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/admin-queue-kick.yml'
   workflow_dispatch:
-  schedule:
-    - cron: '*/5 * * * *'
 
 permissions:
   contents: write
@@ -23,7 +17,6 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Manual/fallback queue drain for admin commands.
           curl --fail-with-body -sS -L \
             -X POST \
             -H "Accept: application/vnd.github+json" \
