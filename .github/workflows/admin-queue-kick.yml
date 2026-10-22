@@ -1,6 +1,10 @@
 name: iKiraPlus Admin Queue Kick
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/admin-queue-kick.yml'
   workflow_dispatch:
 
 permissions:
