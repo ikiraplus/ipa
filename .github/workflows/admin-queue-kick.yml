@@ -21,6 +21,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Manual/fallback queue drain for admin commands.
           curl --fail-with-body -sS -L \
             -X POST \
             -H "Accept: application/vnd.github+json" \
