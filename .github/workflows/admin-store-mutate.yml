@@ -12,6 +12,7 @@ permissions:
 concurrency:
   group: ikiraplus-admin-store
   cancel-in-progress: false
+  queue: max
 
 jobs:
   mutate:
@@ -39,6 +40,45 @@ jobs:
           path: store
           fetch-depth: 1
           persist-credentials: true
+
+
+      - name: Stage direct mutation event
+        if: ${{ github.event_name == 'repository_dispatch' }}
+        shell: python
+        working-directory: store
+        run: |
+          import json
+          import os
+          import pathlib
+          import re
+
+          event = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))
+          command = (event.get('client_payload') or {}).get('command')
+          if command is None:
+              print('No direct command: processing existing store queue')
+              raise SystemExit(0)
+          if not isinstance(command, dict):
+              raise SystemExit('Invalid direct command')
+          request_id = str(command.get('requestId') or '')
+          if not re.fullmatch(r'direct-[A-Za-z0-9_-]{8,110}', request_id):
+              raise SystemExit('Invalid direct request ID')
+          if command.get('op') not in ('add', 'update'):
+              raise SystemExit('Unsupported direct operation')
+          if command.get('storage') not in ('jom', 'deb'):
+              raise SystemExit('Invalid direct storage')
+          if not isinstance(command.get('item'), dict) or not command['item']:
+              raise SystemExit('Missing direct item')
+
+          target_dir = pathlib.Path('admin-commands')
+          target_dir.mkdir(parents=True, exist_ok=True)
+          target = target_dir / (request_id + '.json')
+          if target.exists():
+              previous = json.loads(target.read_text(encoding='utf-8'))
+              if previous != command:
+                  raise SystemExit('Conflicting duplicate request ID')
+          else:
+              target.write_text(json.dumps(command, ensure_ascii=False), encoding='utf-8')
+          print('Staged direct admin mutation:', request_id)
 
       - name: Apply queued admin commands
         shell: python
