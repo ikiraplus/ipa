@@ -1,5 +1,5 @@
 name: iKiraPlus Admin Store Public Runner
-run-name: "Admin store • ${{ github.event.client_payload.requestId || 'queue' }}"
+run-name: "Admin store • ${{ github.event.client_payload.label || github.event.client_payload.requestId || 'queue' }}"
 
 on:
   repository_dispatch:
@@ -92,7 +92,7 @@ jobs:
           import shutil
 
           root = pathlib.Path('.')
-          command_paths = [pathlib.Path(p) for p in sorted(glob.glob('admin-commands/*.json'))]
+          command_paths = sorted((pathlib.Path(p) for p in glob.glob('admin-commands/*.json')), key=lambda p: (p.name.startswith('direct-'), p.name))
           processed_count = 0
 
           if not command_paths:
