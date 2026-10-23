@@ -370,6 +370,74 @@ jobs:
                   encoding='utf-8'
               )
 
+          # Keep the missing-descriptions list in sync with every successful
+          # JOM mutation, not only with the separate manual/scheduled workflow.
+          # Preserve notes already typed in the cache until the apply workflow moves them.
+          if 'jom' in changed_storages:
+              missing_path = root / 'admin' / 'missing-descriptions.json'
+              missing_path.parent.mkdir(parents=True, exist_ok=True)
+              try:
+                  old_missing = json.loads(missing_path.read_text(encoding='utf-8')) if missing_path.exists() else {}
+              except (OSError, ValueError):
+                  old_missing = {}
+              if not isinstance(old_missing, dict):
+                  old_missing = {}
+              old_entries = old_missing.get('apps') or []
+              if not isinstance(old_entries, list):
+                  old_entries = []
+              old_entries = [entry for entry in old_entries if isinstance(entry, dict)]
+
+              def saved_missing_note(item):
+                  checks = (
+                      lambda a, b: bool(a.get('id')) and str(a.get('id')) == str(b.get('id')),
+                      lambda a, b: bool(a.get('ipaUrl')) and str(a.get('ipaUrl')) == str(b.get('ipaUrl')),
+                      lambda a, b: bool(a.get('name')) and bool(a.get('version'))
+                          and str(a.get('name')).casefold() == str(b.get('name')).casefold()
+                          and str(a.get('version')) == str(b.get('version')),
+                  )
+                  for check in checks:
+                      matches = [old for old in old_entries if check(item, old)]
+                      if len(matches) == 1:
+                          return str(matches[0].get('note') or '')
+                  return ''
+
+              fresh_missing = []
+              for item in apps:
+                  if not isinstance(item, dict) or str(item.get('note') or '').strip():
+                      continue
+                  copied = dict(item)
+                  copied['note'] = saved_missing_note(item)
+                  fresh_missing.append(copied)
+
+              now = dt.datetime.now(dt.timezone.utc)
+              generated = now.isoformat().replace('+00:00', 'Z')
+              expiry = old_missing.get('expiresAt')
+              try:
+                  existing_expiry = dt.datetime.fromisoformat(str(expiry).replace('Z', '+00:00'))
+                  if existing_expiry.tzinfo is None:
+                      existing_expiry = existing_expiry.replace(tzinfo=dt.timezone.utc)
+                  if existing_expiry <= now:
+                      expiry = None
+              except (ValueError, TypeError):
+                  expiry = None
+              if not expiry:
+                  expiry = (now + dt.timedelta(hours=48)).isoformat().replace('+00:00', 'Z')
+
+              missing_doc = {
+                  'version': 1,
+                  'source': 'jom.json',
+                  'generatedAt': generated,
+                  'expiresAt': expiry,
+                  'ttlHours': 48,
+                  'totalMissing': len(fresh_missing),
+                  'apps': fresh_missing,
+              }
+              missing_path.write_text(
+                  json.dumps(missing_doc, ensure_ascii=False, indent=2) + '\n',
+                  encoding='utf-8'
+              )
+              print('Missing-descriptions cache synchronized:', len(fresh_missing))
+
           result_rows = result_rows[-100:]
           results_path.write_text(
               json.dumps({'results': result_rows}, ensure_ascii=False, separators=(',', ':')) + '\n',
@@ -393,7 +461,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add -A jom.json deb.json chunks admin-results.json admin-commands 2>/dev/null || true
+          git add -A jom.json deb.json chunks admin/missing-descriptions.json admin-results.json admin-commands 2>/dev/null || true
 
           if git diff --cached --quiet; then
             echo "Nothing to commit."
