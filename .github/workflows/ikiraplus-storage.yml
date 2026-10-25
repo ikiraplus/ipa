@@ -118,6 +118,23 @@ jobs:
               if not script:
                   raise RuntimeError(f"Step has no run script: {name}")
 
+              # Compatibility fix for the pinned private engine: IPAOMTK browser/curl
+              # strategies can already move the validated file to final_file.
+              # The legacy generic step must not attempt to move candidate.bin again.
+              if name == "Download and validate real file" and "ipaomtk.com" in runtime_env["ORIGINAL_URL"].lower():
+                  legacy_move = "shutil.move(str(candidate), str(final_file))"
+                  if script.count(legacy_move) != 1:
+                      raise RuntimeError("Expected IPAOMTK legacy move statement was not found exactly once")
+                  safe_move = (
+                      "if final_file.is_file():\n"
+                      "    print('Download already finalized by IPAOMTK downloader')\n"
+                      "elif candidate.is_file():\n"
+                      "    shutil.move(str(candidate), str(final_file))\n"
+                      "else:\n"
+                      "    raise FileNotFoundError('Neither candidate.bin nor final IPA exists')"
+                  )
+                  script = script.replace(legacy_move, safe_move, 1)
+
               env = os.environ.copy()
               env.update(runtime_env)
               env["GH_TOKEN"] = token
