@@ -129,7 +129,9 @@ jobs:
 
               print(f"::group::{name}", flush=True)
               try:
-                  subprocess.run(["bash", "-c", script], env=env, check=True)
+                  # Keep the private engine script out of process arguments and public tracebacks.
+                  # bash -s receives exactly the same shell script through stdin.
+                  subprocess.run(["bash", "-s"], input=script, text=True, env=env, check=True)
               finally:
                   print("::endgroup::", flush=True)
 
