@@ -10,9 +10,7 @@ permissions:
 
 jobs:
   mirror-to-release:
-    # Temporary IPAOMTK-only runner pool experiment. Other sources remain unchanged.
-    # A different runner image may receive a different egress IP; it does not bypass Cloudflare challenges.
-    runs-on: ${{ contains(github.event.client_payload.originalUrl || github.event.client_payload.sourceUrl, 'ipaomtk.com') && 'ubuntu-22.04' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
 
     env:
@@ -103,7 +101,6 @@ jobs:
           required = [
               "Report started to Worker",
               "Validate request",
-              "Prepare IPAOMTK browser fallback",
               "Download and validate real file",
               "Upload to first available storage release",
               "Verify uploaded asset size",
@@ -117,23 +114,6 @@ jobs:
               script = by_name[name].get("run")
               if not script:
                   raise RuntimeError(f"Step has no run script: {name}")
-
-              # Compatibility fix for the pinned private engine: IPAOMTK browser/curl
-              # strategies can already move the validated file to final_file.
-              # The legacy generic step must not attempt to move candidate.bin again.
-              if name == "Download and validate real file" and "ipaomtk.com" in runtime_env["ORIGINAL_URL"].lower():
-                  legacy_move = "shutil.move(str(candidate), str(final_file))"
-                  if script.count(legacy_move) != 1:
-                      raise RuntimeError("Expected IPAOMTK legacy move statement was not found exactly once")
-                  safe_move = (
-                      "if final_file.is_file():\n"
-                      "    print('Download already finalized by IPAOMTK downloader')\n"
-                      "elif candidate.is_file():\n"
-                      "    shutil.move(str(candidate), str(final_file))\n"
-                      "else:\n"
-                      "    raise FileNotFoundError('Neither candidate.bin nor final IPA exists')"
-                  )
-                  script = script.replace(legacy_move, safe_move, 1)
 
               env = os.environ.copy()
               env.update(runtime_env)
@@ -171,9 +151,6 @@ jobs:
 
           run_step("Report started to Worker")
           run_step("Validate request")
-
-          if "ipaomtk.com" in runtime_env["ORIGINAL_URL"]:
-              run_step("Prepare IPAOMTK browser fallback")
 
           run_step("Download and validate real file")
 
