@@ -69,7 +69,7 @@ def download(source, dst, expected, data, base):
         while proc.poll() is None:
             time.sleep(2)
             now=time.monotonic()
-            if now-last_update >= 30:
+            if now-last_update >= 15:
                 done=dst.stat().st_size if dst.exists() else 0
                 progress(data,base,"downloading",done,expected,(done-last)/(now-last_update))
                 last=done;last_update=now
@@ -94,8 +94,8 @@ def upload(dst, remote, size, data, base):
             raise RuntimeError(f"Missing GitHub Secret: {var}")
     conf["RCLONE_CONFIG_MEGA_TYPE"]="mega"
     conf["RCLONE_CONFIG_MEGA_USE_HTTPS"]="true"
-    # Login was already checked before downloading the source.
-    print("MEGA upload phase: starting encrypted upload", flush=True)
+    # One less MEGA login; this command authenticates and uploads.
+    print("MEGA upload phase: authenticating and sending encrypted data", flush=True)
     proc=subprocess.Popen(["rclone","copyto",str(dst),remote,
                  "--stats","15s","--stats-one-line",
                  "--stats-log-level","NOTICE","--use-json-log",
@@ -163,15 +163,10 @@ def main():
         for var in ("RCLONE_CONFIG_MEGA_USER","RCLONE_CONFIG_MEGA_PASS"):
             if not conf.get(var):
                 raise RuntimeError(f"Missing GitHub Secret: {var}")
-        print("PHASE authentication: checking MEGA login", flush=True)
-        auth_started=time.monotonic()
-        auth=subprocess.run(["rclone","lsd","mega:"],env=conf,
-                            stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
-                            text=True,timeout=180)
-        if auth.returncode:
-            raise RuntimeError("MEGA authentication failed (rclone lsd)")
-        print(f"PHASE authentication complete in {time.monotonic()-auth_started:.1f}s",flush=True)
-        time.sleep(3)
+        # Avoid an extra stateless MEGA login. rclone's MEGA backend warns
+        # that repeated fresh logins can cause temporary account blocking.
+        # Credentials are checked for presence here; upload handles login.
+        print("PHASE credentials: MEGA Secrets present; login occurs during upload",flush=True)
         with tempfile.TemporaryDirectory(prefix="ikiraplus-mega-") as tmp:
             dest=Path(tmp)/name
             print("PHASE download: fetching IPA source", flush=True)
