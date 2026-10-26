@@ -86,6 +86,38 @@ def download(source, dst, expected, data, base):
     progress(data,base,"downloading",done,done)
     return done
 
+def describe_mega_error(raw):
+    """Return only a safe error CATEGORY, not raw logs with account data."""
+    m = str(raw).lower()
+    if any(x in m for x in ("2fa", "two-factor", "mfa", "multi-factor")):
+        return "MEGA requires a fresh two-factor authentication code"
+    if any(x in m for x in ("invalid password", "wrong password", "bad credentials", "invalid credentials", "incorrect password")):
+        return "MEGA rejected the account password"
+    if any(x in m for x in ("blocked", "too many requests", "rate limit", "try again later", "temporarily banned")):
+        return "MEGA may be temporarily limiting account logins"
+    if "object (typically, node or user) not found" in m:
+        return "MEGA returned Object not found (account keys/login not ready)"
+    if any(x in m for x in ("timeout", "deadline exceeded", "connection refused")):
+        return "MEGA authentication network timeout"
+    if "unexpected end of json" in m:
+        return "MEGA API returned incomplete login response"
+    return "MEGA login rejected; verify account, password and 2FA settings"
+
+
+def check_mega_login(conf):
+    print("PHASE MEGA authentication: checking login before IPA download",flush=True)
+    t=time.monotonic()
+    try:
+        result=subprocess.run(["rclone","lsd","mega:", "--retries","1"],
+                   env=conf,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
+                   text=True,timeout=150)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("MEGA login timeout before IPA download") from None
+    if result.returncode:
+        raise RuntimeError(describe_mega_error(result.stderr))
+    print(f"PHASE MEGA authentication: success in {time.monotonic()-t:.1f}s",flush=True)
+
+
 def upload(dst, remote, size, data, base):
     # First check credentials before transferring multi-GB files.
     conf=os.environ.copy()
@@ -103,6 +135,7 @@ def upload(dst, remote, size, data, base):
                  env=conf,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
                  text=True,bufsize=1)
     last_update=0
+    error_category=""
     print("MEGA upload started",flush=True)
     progress(data,base,"uploading",0,size)
     try:
@@ -111,7 +144,10 @@ def upload(dst, remote, size, data, base):
                 entry=str(json.loads(raw).get("msg") or "")
             except (TypeError,ValueError):
                 entry=raw
-            if "Transferred:" not in entry: continue
+            if "Transferred:" not in entry:
+                if "error" in raw.lower() or "couldn't login" in entry.lower():
+                    error_category=describe_mega_error(entry)
+                continue
             m=re.search(r",\s*(\d+(?:\.\d+)?)\s*%",entry)
             if not m: continue
             pct=min(float(m.group(1)),99.0)
@@ -123,7 +159,8 @@ def upload(dst, remote, size, data, base):
     finally:
         if proc.poll() is None:proc.kill()
     if proc.returncode:
-        raise RuntimeError(f"MEGA rclone upload failed (exit {proc.returncode})")
+        raise RuntimeError(f"MEGA rclone upload failed (exit {proc.returncode}): " +
+                           (error_category or "upload failed; inspect credentials or MEGA service"))
     time.sleep(3) # avoid repeated MEGA authentication rate limits
     stats=subprocess.run(["rclone","lsjson","--stat",remote],env=conf,
                    capture_output=True,text=True,timeout=120,check=True)
@@ -163,10 +200,11 @@ def main():
         for var in ("RCLONE_CONFIG_MEGA_USER","RCLONE_CONFIG_MEGA_PASS"):
             if not conf.get(var):
                 raise RuntimeError(f"Missing GitHub Secret: {var}")
-        # Avoid an extra stateless MEGA login. rclone's MEGA backend warns
-        # that repeated fresh logins can cause temporary account blocking.
-        # Credentials are checked for presence here; upload handles login.
-        print("PHASE credentials: MEGA Secrets present; login occurs during upload",flush=True)
+        conf["RCLONE_CONFIG_MEGA_TYPE"]="mega"
+        conf["RCLONE_CONFIG_MEGA_USE_HTTPS"]="true"
+        check_mega_login(conf)
+        # Space rclone commands to lower the risk of MEGA login throttling.
+        time.sleep(3)
         with tempfile.TemporaryDirectory(prefix="ikiraplus-mega-") as tmp:
             dest=Path(tmp)/name
             print("PHASE download: fetching IPA source", flush=True)
