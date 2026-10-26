@@ -15,7 +15,7 @@ concurrency:
 jobs:
   fileditch:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 330
     steps:
       - name: Checkout public ipa repository
         uses: actions/checkout@v4
