@@ -228,7 +228,20 @@ def upload(destination, storage_name, size, data, base):
                 raise RuntimeError("Unexpected stored file extension")
             return remote, saved_name
         if status in (400, 403, 413):
-            raise RuntimeError(f"FileDitch rejected upload: HTTP {status}")
+            # FileDitch's API returns a JSON error description. Show the
+            # server-reported reason, but never dump an arbitrary HTML page.
+            reason = ""
+            try:
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    reason = str(payload.get("error") or payload.get("message") or "")
+            except (ValueError, TypeError):
+                pass
+            reason = re.sub(r"[^a-zA-Z0-9 .,_:;/()\-]", "", reason)[:160]
+            if status == 403 and not reason:
+                reason = "provider denied upload (file-type policy or IP restriction)"
+            raise RuntimeError(f"FileDitch rejected upload: HTTP {status}" +
+                               (f" - {reason}" if reason else ""))
         if status in (0, 429, 500, 503, 507) and attempt < 3:
             time.sleep((attempt + 1) * 8)
             continue
