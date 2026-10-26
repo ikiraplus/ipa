@@ -24,11 +24,14 @@ jobs:
       - name: Checkout public ipa repository
         uses: actions/checkout@v4
 
-      - name: Install rclone
+      - name: Ensure rclone is available
         shell: bash
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq rclone
+          set -euo pipefail
+          if ! command -v rclone >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq rclone
+          fi
           rclone version | head -1
 
       - name: Convert MEGA password for rclone (without logging password)
