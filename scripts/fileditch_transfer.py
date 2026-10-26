@@ -11,6 +11,7 @@ import tempfile
 import time
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 HOSTS = {"fileditchfiles.st", "fileditchfiles.me"}
 ENDPOINT = "https://new.fileditch.com/upload.php"
@@ -31,24 +32,61 @@ def safe_name(raw):
     return name
 
 def callback(url, body, optional=False):
+    """Callback with safe, useful 4xx diagnostics (never print callback tokens)."""
     if not url:
-        if optional: return
+        if optional:
+            return
         raise ValueError("Missing callback")
     checked_url(url)
-    payload = json.dumps(body).encode()
+    payload = json.dumps(body).encode("utf-8")
     for attempt in range(5):
         try:
-            req = Request(url, data=payload, method="POST",
-                          headers={"Content-Type": "application/json"})
+            req = Request(
+                url, data=payload, method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "iKiraPlus-FileDitch-Runner/1.1",
+                },
+            )
             with urlopen(req, timeout=35) as r:
                 if not (200 <= r.status < 300):
-                    raise RuntimeError("Callback rejected")
+                    raise RuntimeError(f"Worker callback returned HTTP {r.status}")
                 return
+        except HTTPError as e:
+            raw = e.read(1600).decode("utf-8", errors="replace")
+            ctype = (e.headers.get("Content-Type") or "").lower()
+            reason = "unknown rejection"
+            if "json" in ctype or raw.lstrip().startswith("{"):
+                try:
+                    code = str(json.loads(raw).get("error") or "")
+                    reason = {
+                        "invalid token": "callback token mismatch in Worker KV",
+                        "not found": "DL link missing in Worker KV",
+                        "unauthorized": "callback requires authorization",
+                        "missing callback fields": "missing callback request fields",
+                    }.get(code, "worker JSON error (review Worker logs)")
+                except (ValueError, TypeError):
+                    reason = "invalid JSON from Worker"
+            elif "<html" in raw.lower() or "text/html" in ctype:
+                reason = "HTML denial (check Cloudflare protection / Access)"
+            elif e.code == 403:
+                reason = "non-JSON 403 (check Cloudflare protection)"
+            if e.code in (400, 401, 403, 404, 409):
+                if optional:
+                    print(f"Failure callback HTTP {e.code}: {reason}", flush=True)
+                    return
+                raise RuntimeError(f"Worker callback HTTP {e.code}: {reason}") from None
+            if attempt == 4:
+                if optional:
+                    return
+                raise RuntimeError(f"Worker callback HTTP {e.code}: {reason}") from None
         except Exception:
             if attempt == 4:
-                if optional: return
+                if optional:
+                    return
                 raise
-            time.sleep(min(2 ** attempt, 12))
+        time.sleep(min(2 ** attempt, 12))
 
 def fetch_file(urls, destination, expected):
     for index, url in enumerate(dict.fromkeys(filter(None, urls))):
@@ -124,7 +162,11 @@ def verify(remote, size):
     raise RuntimeError("Status API could not confirm file size")
 
 def main():
-    data = json.loads(os.environ.get("FILEDITCH_JOB", "{}"))
+    # Do not put dispatch credentials into an Actions step env value:
+    # GitHub prints step environment values before the script can mask them.
+    event_path = os.environ["GITHUB_EVENT_PATH"]
+    with open(event_path, encoding="utf-8") as f:
+        data = (json.load(f).get("client_payload") or {})
     short_id = str(data.get("shortId") or "")
     token = str(data.get("token") or "")
     filename = safe_name(data.get("assetName"))
