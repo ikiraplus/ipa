@@ -1,0 +1,26 @@
+name: iKiraPlus FileDitch ZIP Transfer
+run-name: "FileDitch • ${{ github.event.client_payload.shortId }}"
+
+on:
+  repository_dispatch:
+    types: [ikiraplus_fileditch]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fileditch-${{ github.event.client_payload.shortId }}
+  cancel-in-progress: false
+
+jobs:
+  fileditch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout public ipa repository
+        uses: actions/checkout@v4
+      - name: Transfer approved IPA as ZIP to FileDitch
+        env:
+          FILEDITCH_JOB: ${{ toJSON(github.event.client_payload) }}
+        shell: bash
+        run: python3 scripts/fileditch_transfer.py
