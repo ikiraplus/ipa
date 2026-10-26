@@ -98,8 +98,10 @@ def upload(dst, remote, size, data, base):
                      stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True,timeout=180)
     if r.returncode:
         raise RuntimeError("MEGA authentication failed; check credentials/2FA (rclone lsd)")
+    time.sleep(3)
     proc=subprocess.Popen(["rclone","copyto",str(dst),remote,
-                 "--progress","--stats","30s","--stats-one-line",
+                 "--stats","30s","--stats-one-line",
+                 "--stats-log-level","NOTICE","--use-json-log",
                  "--retries","4","--low-level-retries","8"],
                  env=conf,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
                  text=True,bufsize=1)
@@ -108,26 +110,30 @@ def upload(dst, remote, size, data, base):
     progress(data,base,"uploading",0,size)
     try:
         for raw in proc.stderr:
-            line=raw.replace("\r","\n")
-            for entry in line.splitlines():
-                if "Transferred:" not in entry: continue
-                m=re.search(r",\s*(\d+(?:\.\d+)?)\s*%",entry)
-                if not m:continue
-                pct=min(float(m.group(1)),99.0)
-                now=time.monotonic()
-                if now-last_update>=27:
-                    progress(data,base,"uploading",int(size*pct/100),size)
-                    last_update=now
+            try:
+                entry=str(json.loads(raw).get("msg") or "")
+            except (TypeError,ValueError):
+                entry=raw
+            if "Transferred:" not in entry: continue
+            m=re.search(r",\s*(\d+(?:\.\d+)?)\s*%",entry)
+            if not m: continue
+            pct=min(float(m.group(1)),99.0)
+            now=time.monotonic()
+            if now-last_update>=27:
+                progress(data,base,"uploading",int(size*pct/100),size)
+                last_update=now
         proc.wait(timeout=120)
     finally:
         if proc.poll() is None:proc.kill()
     if proc.returncode:
         raise RuntimeError(f"MEGA rclone upload failed (exit {proc.returncode})")
+    time.sleep(3) # avoid repeated MEGA authentication rate limits
     stats=subprocess.run(["rclone","lsjson","--stat",remote],env=conf,
                    capture_output=True,text=True,timeout=120,check=True)
     metadata=json.loads(stats.stdout)
     if int(metadata.get("Size") or -1)!=size:
         raise RuntimeError("MEGA remote size differs from downloaded IPA")
+    time.sleep(3) # avoid rapid repeated stateless MEGA logins
     link=subprocess.run(["rclone","link",remote],env=conf,
                    capture_output=True,text=True,timeout=120,check=True).stdout.strip().splitlines()[-1]
     p=urlsplit(link)
