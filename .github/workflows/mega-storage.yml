@@ -19,7 +19,6 @@ jobs:
     env:
       RCLONE_CONFIG_MEGA_TYPE: mega
       RCLONE_CONFIG_MEGA_USER: ${{ secrets.MEGA_EMAIL }}
-      RCLONE_CONFIG_MEGA_PASS: ${{ secrets.MEGA_PASSWORD_OBSCURED }}
       RCLONE_CONFIG_MEGA_2FA: ${{ secrets.MEGA_2FA }}
     steps:
       - name: Checkout public ipa repository
@@ -31,6 +30,27 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq rclone
           rclone version | head -1
+
+      - name: Convert MEGA password for rclone (without logging password)
+        shell: bash
+        env:
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${MEGA_PASSWORD:-}" ]]; then
+            echo "::error::Missing Actions secret MEGA_PASSWORD"
+            exit 1
+          fi
+          # rclone obscure - reads password from stdin, not process args.
+          # Never print the raw or obscured password into job logs.
+          obscured="$(printf '%s\n' "$MEGA_PASSWORD" | rclone obscure -)"
+          if [[ -z "$obscured" ]]; then
+            echo "::error::rclone failed to obscure password"
+            exit 1
+          fi
+          echo "::add-mask::$obscured"
+          printf 'RCLONE_CONFIG_MEGA_PASS=%s\n' "$obscured" >> "$GITHUB_ENV"
+          unset MEGA_PASSWORD obscured
 
       - name: Transfer external IPA to MEGA
         shell: bash
