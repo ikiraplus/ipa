@@ -1,0 +1,37 @@
+name: iKiraPlus MEGA Storage
+run-name: "MEGA • ${{ github.event.client_payload.shortId }}"
+
+on:
+  repository_dispatch:
+    types: [ikiraplus_mega]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mega-${{ github.event.client_payload.shortId }}
+  cancel-in-progress: false
+
+jobs:
+  mega-upload:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      RCLONE_CONFIG_MEGA_TYPE: mega
+      RCLONE_CONFIG_MEGA_USER: ${{ secrets.MEGA_EMAIL }}
+      RCLONE_CONFIG_MEGA_PASS: ${{ secrets.MEGA_PASSWORD_OBSCURED }}
+      RCLONE_CONFIG_MEGA_2FA: ${{ secrets.MEGA_2FA }}
+    steps:
+      - name: Checkout public ipa repository
+        uses: actions/checkout@v4
+
+      - name: Install rclone
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone
+          rclone version | head -1
+
+      - name: Transfer external IPA to MEGA
+        shell: bash
+        run: python3 scripts/mega_storage_transfer.py
