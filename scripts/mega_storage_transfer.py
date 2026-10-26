@@ -94,13 +94,10 @@ def upload(dst, remote, size, data, base):
             raise RuntimeError(f"Missing GitHub Secret: {var}")
     conf["RCLONE_CONFIG_MEGA_TYPE"]="mega"
     conf["RCLONE_CONFIG_MEGA_USE_HTTPS"]="true"
-    r=subprocess.run(["rclone","lsd","mega:"],env=conf,
-                     stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True,timeout=180)
-    if r.returncode:
-        raise RuntimeError("MEGA authentication failed; check credentials/2FA (rclone lsd)")
-    time.sleep(3)
+    # Login was already checked before downloading the source.
+    print("MEGA upload phase: starting encrypted upload", flush=True)
     proc=subprocess.Popen(["rclone","copyto",str(dst),remote,
-                 "--stats","30s","--stats-one-line",
+                 "--stats","15s","--stats-one-line",
                  "--stats-log-level","NOTICE","--use-json-log",
                  "--retries","4","--low-level-retries","8"],
                  env=conf,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
@@ -119,7 +116,7 @@ def upload(dst, remote, size, data, base):
             if not m: continue
             pct=min(float(m.group(1)),99.0)
             now=time.monotonic()
-            if now-last_update>=27:
+            if now-last_update>=14:
                 progress(data,base,"uploading",int(size*pct/100),size)
                 last_update=now
         proc.wait(timeout=120)
@@ -159,22 +156,41 @@ def main():
           "runUrl":f"https://github.com/{os.environ.get('GITHUB_REPOSITORY','ikiraplus/ipa')}/actions/runs/{run_id}"}
     try:
         callback(data.get("callbackStarted"),base)
+        started=time.monotonic()
+        expected=int(data.get("expectedSize") or 0)
+        # Check login before expensive downloads, not after.
+        conf=os.environ.copy()
+        for var in ("RCLONE_CONFIG_MEGA_USER","RCLONE_CONFIG_MEGA_PASS"):
+            if not conf.get(var):
+                raise RuntimeError(f"Missing GitHub Secret: {var}")
+        print("PHASE authentication: checking MEGA login", flush=True)
+        auth_started=time.monotonic()
+        auth=subprocess.run(["rclone","lsd","mega:"],env=conf,
+                            stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
+                            text=True,timeout=180)
+        if auth.returncode:
+            raise RuntimeError("MEGA authentication failed (rclone lsd)")
+        print(f"PHASE authentication complete in {time.monotonic()-auth_started:.1f}s",flush=True)
+        time.sleep(3)
         with tempfile.TemporaryDirectory(prefix="ikiraplus-mega-") as tmp:
             dest=Path(tmp)/name
-            expected=int(data.get("expectedSize") or 0)
-            # Invalid/absent MEGA credentials should fail before 3.6GB download.
-            for var in ("RCLONE_CONFIG_MEGA_USER","RCLONE_CONFIG_MEGA_PASS"):
-                if not os.getenv(var):raise RuntimeError(f"Missing GitHub Secret: {var}")
+            print("PHASE download: fetching IPA source", flush=True)
+            download_started=time.monotonic()
             size=download(source,dest,expected,data,base)
+            print(f"PHASE download complete in {time.monotonic()-download_started:.1f}s; "
+                  f"mean speed {size/max(time.monotonic()-download_started,1)/1024**2:.2f}MiB/s",flush=True)
             digest=hashlib.sha256()
             with dest.open("rb") as fd:
                 for block in iter(lambda:fd.read(4*1024*1024),b""):digest.update(block)
             remote=f"mega:iKiraPlus-DL/{id_}/{run_id}/{name}"
+            upload_started=time.monotonic()
+            print("PHASE upload: sending IPA to MEGA",flush=True)
             link=upload(dest,remote,size,data,base)
+            print(f"PHASE upload plus verification completed in {time.monotonic()-upload_started:.1f}s",flush=True)
             progress(data,base,"verifying",size,size)
             callback(data.get("callbackComplete"),{**base,"url":link,
                      "size":size,"sha256":digest.hexdigest()})
-            print("MEGA object verified, DL callback accepted",flush=True)
+            print(f"MEGA object verified, DL callback accepted; total time {time.monotonic()-started:.1f}s",flush=True)
     except Exception as e:
         print("MEGA transfer failed:",type(e).__name__,str(e)[:160],flush=True)
         callback(data.get("callbackFailed"),{**base,"message":str(e)[:200]},optional=True)
