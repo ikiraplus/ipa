@@ -97,6 +97,10 @@ def human_size(n):
 def send_progress(data, base, stage, done, total, speed):
     """Best-effort heartbeat: 1 KV write per ~30 sec, never fail a transfer."""
     url = data.get("callbackProgress")
+    # Uploading bytes does NOT imply the storage provider accepted the file.
+    # Reserve 100% for an acknowledged and verified transfer.
+    if stage == "uploading" and total > 0:
+        done = min(done, int(total * 0.99))
     percent = (100 * done / total) if total else 0
     print(
         f"PROGRESS {stage}: {human_size(done)} / {human_size(total)} "
@@ -294,10 +298,11 @@ def main():
             storage_name = filename[:-4] + ".zip" if filename.lower().endswith(".ipa") else filename + ".zip"
             print("Storing authorized ZIP archive without modifying its bytes", flush=True)
             remote, confirmed_name = upload(dest, storage_name, size, data, base)
-            send_progress(data, base, "verifying", size, size, 0)
+            send_progress(data, base, "verifying", 0, size, 0)
             verify(remote, size)
             callback(data["callbackComplete"], {**base, "url":remote, "size":size,
                 "storedName":confirmed_name, "sha256":h.hexdigest()})
+            send_progress(data, base, "complete", size, size, 0)
             print("Verified upload; DL callback accepted", flush=True)
     except Exception as e:
         print("Transfer failed:", str(e)[:300], flush=True)
