@@ -20,7 +20,7 @@ jobs:
       - name: Checkout public ipa repository
         uses: actions/checkout@v4
       - name: Transfer approved IPA as ZIP to FileDitch
-        env:
-          FILEDITCH_JOB: ${{ toJSON(github.event.client_payload) }}
+        # Never serialize client_payload into the step environment/logs:
+        # it contains one-time callback credentials.
         shell: bash
         run: python3 scripts/fileditch_transfer.py
