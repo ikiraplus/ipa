@@ -24,14 +24,19 @@ jobs:
       - name: Checkout public ipa repository
         uses: actions/checkout@v4
 
-      - name: Ensure rclone is available
+      - name: Install verified current rclone v1.75.2
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v rclone >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq rclone
-          fi
+          # Ubuntu apt packaged v1.60.1-DEV in prior run; use a pinned official release.
+          curl -fL --retry 3 --connect-timeout 20 \
+            "https://github.com/rclone/rclone/releases/download/v1.75.2/rclone-v1.75.2-linux-amd64.zip" \
+            -o /tmp/rclone-v1.75.2-linux-amd64.zip
+          echo "349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702  /tmp/rclone-v1.75.2-linux-amd64.zip" \
+            | sha256sum -c -
+          unzip -qq /tmp/rclone-v1.75.2-linux-amd64.zip \
+            "rclone-v1.75.2-linux-amd64/rclone" -d /tmp/
+          sudo install -m 0755 /tmp/rclone-v1.75.2-linux-amd64/rclone /usr/local/bin/rclone
           rclone version | head -1
 
       - name: Convert MEGA password for rclone (without logging password)
