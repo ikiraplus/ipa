@@ -92,6 +92,19 @@ jobs:
               if value:
                   print(f"::add-mask::{value}", flush=True)
 
+          # Mask hostnames separately: redirects and alternate URLs may not
+          # match the original full-URL mask.
+          from urllib.parse import urlsplit
+          for value in (source_url, original_url):
+              try:
+                  parsed = urlsplit(value)
+                  if parsed.hostname:
+                      print(f"::add-mask::{parsed.hostname}", flush=True)
+                  if parsed.netloc and parsed.netloc != parsed.hostname:
+                      print(f"::add-mask::{parsed.netloc}", flush=True)
+              except (TypeError, ValueError):
+                  pass
+
           steps = workflow["jobs"]["mirror-to-release"]["steps"]
           by_name = {step.get("name"): step for step in steps if step.get("name")}
 
@@ -299,13 +312,44 @@ jobs:
           run_step("Report started to Worker")
           run_step("Validate request")
 
+          # Compress ONLY these signed-output IPA domains. Keep every other
+          # source byte-for-byte unchanged, even with older Worker payloads.
+          # The Worker sends compressArchive for consistency; the hostname
+          # allowlist is enforced here independently.
+          def compression_source_allowed(raw_url):
+              from urllib.parse import urlsplit
+              from hashlib import sha256
+              try:
+                  parsed = urlsplit(str(raw_url or ""))
+                  host = (parsed.hostname or "").lower().rstrip(".")
+                  if parsed.scheme not in ("http", "https") or not parsed.path.rstrip("/").lower().endswith(".ipa"):
+                      return False
+                  # Keep source identifiers out of public workflow code and logs.
+                  allowed_host_digests = frozenset((
+                      "779776d89ed67e1880b9e6dbe026c4e78466290368909a9ef5cf7a336be2cd17",
+                      "538375ba94536782ac05cfd763dacded3190502550c2e6f47654d7102ab79983",
+                      "eee37772b5e887f69d15ae3268e759d7658deec55f7370895e3cd54f7cb27560",
+                      "2d753bc278ca9217d03c69e7be53af34ae08a7dafc2eb0042125ea21cb8caee3",
+                  ))
+                  # Preserve the original rule: an exact host or any of its subdomains.
+                  labels = host.split(".")
+                  return any(
+                      sha256(".".join(labels[i:]).encode("utf-8")).hexdigest() in allowed_host_digests
+                      for i in range(len(labels))
+                  )
+              except (TypeError, ValueError, UnicodeError):
+                  return False
+
           download_started = time.time()
           download_outputs = run_step("Download and validate real file")
-          try:
-              optimize_local_archive(download_outputs, download_started)
-          except Exception:
-              # Even discovery/inspection errors must not interrupt the upload.
-              print("Archive optimization unavailable; original retained for upload.", flush=True)
+          if compression_source_allowed(original_url) and payload.get("compressArchive") is not False:
+              try:
+                  optimize_local_archive(download_outputs, download_started)
+              except Exception:
+                  # Even discovery/inspection errors must not interrupt the upload.
+                  print("Archive optimization unavailable; original retained for upload.", flush=True)
+          else:
+              print("Archive optimization skipped (source not eligible); original IPA retained.", flush=True)
 
           upload_outputs = run_step("Upload to first available storage release", target=True)
           storage_tag = upload_outputs.get("tag", "").strip()
