@@ -178,6 +178,12 @@ jobs:
                       return False
 
               paths = set()
+              # Output paths from the download step take priority even outside standard runner directories.
+              for key, value in outputs.items():
+                  if "path" in key.lower() or "file" in key.lower():
+                      value = str(value or "")
+                      if value and os.path.isfile(os.path.expanduser(value)):
+                          paths.add(os.path.realpath(os.path.expanduser(value)))
               for root in roots():
                   for folder, directories, filenames in os.walk(root, followlinks=False):
                       depth = os.path.relpath(folder, root).count(os.sep)
@@ -235,7 +241,7 @@ jobs:
               try:
                   fd, temporary = tempfile.mkstemp(prefix=".ipa-optimized-", suffix=".tmp", dir=os.path.dirname(selected))
                   os.close(fd)
-                  with zipfile.ZipFile(selected, "r") as source, zipfile.ZipFile(temporary, "w", allowZip64=True) as target:
+                  with zipfile.ZipFile(selected, "r") as source, zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as target:
                       entries = source.infolist()
                       if not entries or len(entries) > 100000:
                           raise ValueError("Unexpected archive entry count")
@@ -249,7 +255,7 @@ jobs:
                           if entry.is_dir():
                               target.writestr(metadata, b"")
                           else:
-                              with source.open(entry, "r") as reader, target.open(metadata, "w", force_zip64=True) as writer:
+                              with source.open(entry, "r") as reader, target.open(metadata, "w") as writer:
                                   while True:
                                       chunk = reader.read(2 * 1024 * 1024)
                                       if not chunk:
