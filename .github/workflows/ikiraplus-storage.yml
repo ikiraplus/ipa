@@ -51,6 +51,7 @@ jobs:
           import os
           import subprocess
           import tempfile
+          import time
           import yaml
 
           engine_path = os.path.join(os.environ["RUNNER_TEMP"], "ikiraplus-storage-private.yml")
@@ -149,10 +150,152 @@ jobs:
                       pass
               return outputs
 
+
+          def optimize_local_archive(outputs, started):
+              # The upload engine keeps its downloaded asset on this runner.
+              # Optimize only a uniquely identified IPA; otherwise preserve the original.
+              import copy
+              import struct
+              import zipfile
+
+              def roots():
+                  values = [os.getcwd(), os.environ.get("GITHUB_WORKSPACE"), os.environ.get("RUNNER_TEMP"), tempfile.gettempdir()]
+                  return list(dict.fromkeys(os.path.realpath(v) for v in values if v and os.path.isdir(v)))
+
+              def eligible(path):
+                  try:
+                      if os.path.islink(path) or not os.path.isfile(path):
+                          return False
+                      st = os.stat(path)
+                      if st.st_mtime < started - 30 or not 262144 <= st.st_size < 2 * 1024 ** 3:
+                          return False
+                      with open(path, "rb") as fd:
+                          if fd.read(2) != b"PK":
+                              return False
+                      with zipfile.ZipFile(path, "r") as archive:
+                          return any(name.startswith("Payload/") and ".app/" in name for name in archive.namelist())
+                  except (OSError, ValueError, zipfile.BadZipFile, RuntimeError):
+                      return False
+
+              paths = set()
+              for root in roots():
+                  for folder, directories, filenames in os.walk(root, followlinks=False):
+                      depth = os.path.relpath(folder, root).count(os.sep)
+                      if depth >= 7:
+                          directories[:] = []
+                      else:
+                          directories[:] = [d for d in directories if d not in (".git", "node_modules", ".cache", ".venv", "site-packages")]
+                      for filename in filenames:
+                          path = os.path.join(folder, filename)
+                          try:
+                              if os.stat(path).st_mtime >= started - 30:
+                                  paths.add(os.path.realpath(path))
+                          except OSError:
+                              pass
+
+              candidates = sorted(p for p in paths if eligible(p))
+              selected = None
+              if len(candidates) == 1:
+                  selected = candidates[0]
+              elif len(candidates) > 1:
+                  hints = []
+                  for key, value in outputs.items():
+                      if "path" in key.lower() or "file" in key.lower():
+                          hint = os.path.realpath(os.path.expanduser(str(value)))
+                          if hint in candidates:
+                              hints.append(hint)
+                  named = [p for p in candidates if os.path.basename(p) == runtime_env["ASSET_NAME"]]
+                  matches = list(dict.fromkeys(hints or named))
+                  if len(matches) == 1:
+                      selected = matches[0]
+
+              if not selected:
+                  print("Archive optimization skipped; original upload path retained.", flush=True)
+                  return
+
+              def without_zip64(extra):
+                  # Old ZIP64 size fields must not be duplicated during repacking.
+                  result = bytearray()
+                  offset = 0
+                  while offset < len(extra):
+                      if offset + 4 > len(extra):
+                          raise ValueError("Invalid ZIP extra field")
+                      tag, length = struct.unpack_from("<HH", extra, offset)
+                      end = offset + 4 + length
+                      if end > len(extra):
+                          raise ValueError("Invalid ZIP extra field size")
+                      if tag != 0x0001:
+                          result.extend(extra[offset:end])
+                      offset = end
+                  return bytes(result)
+
+              temporary = None
+              original_size = os.path.getsize(selected)
+              deadline = time.monotonic() + 12 * 60
+              try:
+                  fd, temporary = tempfile.mkstemp(prefix=".ipa-optimized-", suffix=".tmp", dir=os.path.dirname(selected))
+                  os.close(fd)
+                  with zipfile.ZipFile(selected, "r") as source, zipfile.ZipFile(temporary, "w", allowZip64=True) as target:
+                      entries = source.infolist()
+                      if not entries or len(entries) > 100000:
+                          raise ValueError("Unexpected archive entry count")
+                      target.comment = source.comment
+                      for entry in entries:
+                          if time.monotonic() > deadline:
+                              raise TimeoutError("Archive optimization limit exceeded")
+                          metadata = copy.copy(entry)
+                          metadata.extra = without_zip64(entry.extra)
+                          metadata.compress_type = zipfile.ZIP_STORED if entry.is_dir() else zipfile.ZIP_DEFLATED
+                          if entry.is_dir():
+                              target.writestr(metadata, b"")
+                          else:
+                              with source.open(entry, "r") as reader, target.open(metadata, "w", force_zip64=True) as writer:
+                                  while True:
+                                      chunk = reader.read(2 * 1024 * 1024)
+                                      if not chunk:
+                                          break
+                                      writer.write(chunk)
+                                      if time.monotonic() > deadline:
+                                          raise TimeoutError("Archive optimization limit exceeded")
+                  optimized_size = os.path.getsize(temporary)
+                  if optimized_size >= original_size:
+                      print("Archive optimization provided no savings; original retained.", flush=True)
+                      return
+
+                  # Verify member order, names, sizes, CRCs and every uncompressed byte.
+                  with zipfile.ZipFile(selected, "r") as source, zipfile.ZipFile(temporary, "r") as target:
+                      before = source.infolist()
+                      after = target.infolist()
+                      if len(before) != len(after) or source.comment != target.comment:
+                          raise ValueError("Archive comparison failed")
+                      for a, b in zip(before, after):
+                          if (a.filename, a.file_size, a.CRC) != (b.filename, b.file_size, b.CRC):
+                              raise ValueError("Archive integrity mismatch")
+                          with target.open(b, "r") as reader:
+                              while reader.read(2 * 1024 * 1024):
+                                  if time.monotonic() > deadline:
+                                      raise TimeoutError("Archive verification limit exceeded")
+
+                  os.replace(temporary, selected)
+                  temporary = None
+                  runtime_env["EXPECTED_SIZE"] = str(optimized_size)
+                  print("Smaller verified IPA selected for upload.", flush=True)
+              except Exception:
+                  # An optimization error must never fail the normal upload.
+                  print("Archive optimization failed; original retained for upload.", flush=True)
+              finally:
+                  if temporary:
+                      try:
+                          os.unlink(temporary)
+                      except OSError:
+                          pass
+
           run_step("Report started to Worker")
           run_step("Validate request")
 
-          run_step("Download and validate real file")
+          download_started = time.time()
+          download_outputs = run_step("Download and validate real file")
+          optimize_local_archive(download_outputs, download_started)
 
           upload_outputs = run_step("Upload to first available storage release", target=True)
           storage_tag = upload_outputs.get("tag", "").strip()
