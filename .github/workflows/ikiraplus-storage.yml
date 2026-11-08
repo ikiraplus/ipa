@@ -301,7 +301,11 @@ jobs:
 
           download_started = time.time()
           download_outputs = run_step("Download and validate real file")
-          optimize_local_archive(download_outputs, download_started)
+          try:
+              optimize_local_archive(download_outputs, download_started)
+          except Exception:
+              # Even discovery/inspection errors must not interrupt the upload.
+              print("Archive optimization unavailable; original retained for upload.", flush=True)
 
           upload_outputs = run_step("Upload to first available storage release", target=True)
           storage_tag = upload_outputs.get("tag", "").strip()
